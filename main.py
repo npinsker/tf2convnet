@@ -1,75 +1,29 @@
 import numpy as np
 import numpy.fft as fft
 import tensorflow as tf
-import random
+import graph_util
+
+import argparse
+import json
 import math
+import random
 
-def weight_variable(shape):
-  initial = tf.truncated_normal(shape, stddev=0.1)
-  return tf.Variable(initial)
-
-def bias_variable(shape):
-  initial = tf.constant(0.01, shape=shape)
-  return tf.Variable(initial)
-
-SAMPLE_SIZE = 2
-
-x = tf.placeholder(tf.float32, [None, SAMPLE_SIZE])
-
-LAYER1_SIZE = 1
-OUTPUT_SIZE = 2
-
-W1 = weight_variable([SAMPLE_SIZE, OUTPUT_SIZE])
-b1 = tf.Variable([333,444], dtype='float32')
-
-y = tf.nn.relu(tf.matmul(x, W1) + b1)
-
-y_ = tf.placeholder(tf.float32, [None, OUTPUT_SIZE])
-cross_entropy = tf.nn.softmax_cross_entropy_with_logits(y, y_)
-
-#train_step = tf.train.AdamOptimizer(4e-4).minimize(cross_entropy)
-
-#correct_prediction = tf.equal(tf.argmax(y,1), tf.argmax(y_,1))
-#accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
-
-INPUT_NODE_NAME = 'Placeholder'
-OUTPUT_NODE_NAME = 'Relu'
-
-saver = tf.train.Saver()
-
-init = tf.initialize_all_variables()
-sess = tf.Session()
-sess.run(init)
-
-graph_def = tf.get_default_graph().as_graph_def(add_shapes=True)
-
-nodes_by_key = {}
-
-for node in graph_def.node:
-  nodes_by_key[node.name] = node
-
-def find_node_path(input_node, output_node, nodes_by_key):
-  if input_node not in nodes_by_key:
+def find_node_path(input_node_name, output_node_name, graph):
+  if not graph.get_node(input_node_name):
     raise ValueError('Input node %s not in node dictionary.' % input_node)
-  if output_node not in nodes_by_key:
+  if not graph.get_node(output_node_name):
     raise ValueError('Output node %s not in node dictionary.' % output_node)
 
-  def search_for_node(cur_node_proto, target_node_name, nodes_by_key):
+  def search_for_node(cur_node_proto, target_node_name, graph):
     # We search backwards through the operation graph to find the input node.
     if cur_node_proto.name == target_node_name:
       return [target_node_name]
     for prev_node in cur_node_proto.input:
-      path = search_for_node(nodes_by_key[prev_node], target_node_name, nodes_by_key)
+      path = search_for_node(graph.get_node(prev_node), target_node_name, graph)
       if path:
         return path + [cur_node_proto.name]
 
-  return search_for_node(nodes_by_key[output_node], input_node, nodes_by_key)
-
-reader = tf.train.NewCheckpointReader('model.ckpt')
-path = find_node_path(INPUT_NODE_NAME, OUTPUT_NODE_NAME, nodes_by_key)
-
-layers = []
-marker = 0
+  return search_for_node(graph.get_node(output_node_name), input_node_name, graph)
 
 def get_shape(node):
   shape = []
@@ -83,24 +37,30 @@ def get_shape(node):
 def array_to_json(arr):
   json_arr = {'sx':1, 'sy':1, 'depth':len(arr), 'w':{}}
   for i in range(len(arr)):
-    json_arr['w'][str(i)] = arr[i]
+    json_arr['w'][str(i)] = float(arr[i])
   return json_arr
 
-def build_affine_matrix(matrix_node, add_node, prev_node):
-  variable_node = matrix_node.input[0]
-  if variable_node == prev_node:
-    variable_node = matrix_node.input[1]
-  if variable_node.endswith('/read'):
-    variable_node = variable_node[:-5]
+def get_tensor_value(node_name, checkpoint_reader):
+  if node_name.endswith('/read'):
+    node_name = node_name[:-5]
+  return checkpoint_reader.get_tensor(node_name)
 
-  variable_tensor = reader.get_tensor(variable_node)
+def build_affine_matrix(matrix_node, add_node, prev_node_name, checkpoint_reader):
+  variable_node_name = matrix_node.input[0]
+  if variable_node_name == prev_node_name:
+    variable_node_name = matrix_node.input[1]
+  variable_tensor = get_tensor_value(variable_node_name, checkpoint_reader)
   bias_tensor = None
-  for prev_node in add_node.input:
-    if prev_node != matrix_node.name:
-      if prev_node.endswith('/read'):
-        prev_node = prev_node[:-5]
-      bias_tensor = reader.get_tensor(prev_node)
-      break
+  if add_node:
+    for prev_node in add_node.input:
+      if prev_node != matrix_node.name:
+        bias_tensor = get_tensor_value(prev_node, checkpoint_reader)
+        break
+  else:
+    print 'warning: No bias tensor found for node %s!' % matrix_node.name
+    bias_tensor = np.array([0] * variable_tensor.shape[0])
+
+  print 'Building FC layer with dimensions', variable_tensor.shape, '...'
   fc_array = {'layer_type': 'fc',
                'out_depth': 1,
                'out_sx': 1,
@@ -112,24 +72,63 @@ def build_affine_matrix(matrix_node, add_node, prev_node):
 
   return fc_array
 
-while marker < len(path):
-  node_proto = nodes_by_key[path[marker]]
-  if node_proto.op == 'Placeholder':
-    shape = get_shape(node_proto)
-    layers += [{'layer_type': 'input',
-                'out_depth': shape[0],
-                'out_sx': shape[1],
-                'out_sy': shape[2]}]
-  elif node_proto.op == 'MatMul':
-    if marker < len(path) - 1 and nodes_by_key[path[marker+1]].op == 'Add':
-      layers += [build_affine_matrix(node_proto, nodes_by_key[path[marker+1]],
-                                    nodes_by_key[path[marker-1]].name)]
-  elif node_proto.op == 'Relu':
-    shape = get_shape(node_proto)
-    layers += [{'layer_type': 'relu',
-                'out_depth': shape[0],
-                'out_sx': shape[1],
-                'out_sy': shape[2]}]
-  marker += 1
+def generate_model_json(meta_file, checkpoint_file):
+  INPUT_NODE_NAME = 'Placeholder'
+  OUTPUT_NODE_NAME = 'Relu'
 
-print layers
+  layers = []
+  marker = 0
+  reader = tf.train.NewCheckpointReader(checkpoint_file)
+  sess = tf.Session()
+
+  saver = tf.train.import_meta_graph(meta_file)
+  saver.restore(sess, checkpoint_file)
+
+  graph_def = tf.get_default_graph().as_graph_def(add_shapes=True)
+  graph = graph_util.TFGraph(graph_def)
+
+  reader = tf.train.NewCheckpointReader(checkpoint_file)
+  path = find_node_path(INPUT_NODE_NAME, OUTPUT_NODE_NAME, graph)
+
+  while marker < len(path):
+    node_proto = graph.get_node(path[marker])
+    if node_proto.op == 'Placeholder':
+      shape = get_shape(node_proto)
+      layers += [{'layer_type': 'input',
+                  'out_depth': shape[0],
+                  'out_sx': shape[1],
+                  'out_sy': shape[2]}]
+    elif node_proto.op == 'MatMul':
+      if marker < len(path) - 1 and graph.get_node(path[marker+1]).op == 'Add':
+        layers += [build_affine_matrix(node_proto, graph.get_node(path[marker+1]),
+                                       path[marker-1], reader)]
+        marker += 2
+      else:
+        layers += [build_affine_matrix(node_proto, None, path[marker-1], reader)]
+        marker += 1
+    elif node_proto.op == 'Relu':
+      shape = get_shape(node_proto)
+      layers += [{'layer_type': 'relu',
+                  'out_depth': shape[0],
+                  'out_sx': shape[1],
+                  'out_sy': shape[2]}]
+    marker += 1
+
+  print 'Done.'
+  return {'layers': layers}
+
+parser = argparse.ArgumentParser(description='Convert a TensorFlow model to ' +
+  'a JSON string for use with ConvNetJS.')
+parser.add_argument('--checkpoint_file', nargs=1,
+  help='The checkpoint file containing variable values.')
+parser.add_argument('--meta_file', nargs=1,
+  help='The meta file containing the structure of the graph.')
+parser.add_argument('--output_file', nargs=1,
+  help='The output file containing the graph formatted as JSON.',
+  default=['model.json'])
+args = parser.parse_args()
+
+if args.checkpoint_file[0] and args.meta_file[0]:
+  model_json = generate_model_json(args.meta_file[0], args.checkpoint_file[0])
+  f = open(args.output_file[0], 'w')
+  f.write(json.dumps(model_json))
