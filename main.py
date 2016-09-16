@@ -86,7 +86,7 @@ def generate_model_json(args):
 
   graph_def = tf.get_default_graph().as_graph_def(add_shapes=True)
   graph = graph_util.TFGraph(graph_def)
-  reader = tf.train.NewCheckpointReader(checkpoint_file)
+  reader = tf.train.NewCheckpointReader(args.checkpoint_file[0])
 
   path = []
   if not args.input_node or not args.output_node:
@@ -109,10 +109,9 @@ def generate_model_json(args):
       if marker < len(path) - 1 and graph.get_node(path[marker+1]).op == 'Add':
         layers += [build_affine_matrix(node_proto, graph.get_node(path[marker+1]),
                                        path[marker-1], reader)]
-        marker += 2
+        marker += 1  # Skip the Add operation (not strictly necessary)
       else:
         layers += [build_affine_matrix(node_proto, None, path[marker-1], reader)]
-        marker += 1
     elif node_proto.op == 'Relu':
       shape = get_shape(node_proto)
       layers += [{'layer_type': 'relu',
@@ -133,9 +132,13 @@ parser.add_argument('--meta_file', nargs=1,
 parser.add_argument('--output_file', nargs=1,
   help='The output file containing the graph formatted as JSON.',
   default=['model.json'])
+parser.add_argument('--input_node', nargs=1,
+  help='The name of the node that holds the input value.')
+parser.add_argument('--output_node', nargs=1,
+  help='The name of the node that holds the output value.')
 args = parser.parse_args()
 
 if args.checkpoint_file[0] and args.meta_file[0]:
-  model_json = generate_model_json(args.meta_file[0], args.checkpoint_file[0])
+  model_json = generate_model_json(args)
   f = open(args.output_file[0], 'w')
   f.write(json.dumps(model_json))

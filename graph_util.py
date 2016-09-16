@@ -29,6 +29,9 @@ class TFGraph:
   def get_all_nodes(self):
     return self.__graph_def.node
 
+def _is_likely_dropout_node(node):
+  return 'dropout' in node.name and node.op == 'Mul'
+
 def find_longest_path(graph):
   SUPPORTED_NODE_TYPES = ['Placeholder', 'MatMul', 'Add', 'Relu']
   SOURCE_NODE_TYPE = 'Placeholder'
@@ -44,7 +47,7 @@ def find_longest_path(graph):
     if node.op == SOURCE_NODE_TYPE and len(node.input) == 0:
       length_to_start[node_name] = 0
       return 0
-    elif node.op not in SUPPORTED_NODE_TYPES:
+    elif node.op not in SUPPORTED_NODE_TYPES and not _is_likely_dropout_node(node):
       return NEGINF
     length_to_start[node_name] = 1 + max(
       [find_length_to_start(prev_node_name, length_to_start) \
