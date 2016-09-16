@@ -80,8 +80,37 @@ def get_shape(node):
     shape += [1]
   return shape
 
-def build_affine_matrix(matrix_node, bias_node):
-  pass
+def array_to_json(arr):
+  json_arr = {'sx':1, 'sy':1, 'depth':len(arr), 'w':{}}
+  for i in range(len(arr)):
+    json_arr['w'][str(i)] = arr[i]
+  return json_arr
+
+def build_affine_matrix(matrix_node, add_node, prev_node):
+  variable_node = matrix_node.input[0]
+  if variable_node == prev_node:
+    variable_node = matrix_node.input[1]
+  if variable_node.endswith('/read'):
+    variable_node = variable_node[:-5]
+
+  variable_tensor = reader.get_tensor(variable_node)
+  bias_tensor = None
+  for prev_node in add_node.input:
+    if prev_node != matrix_node.name:
+      if prev_node.endswith('/read'):
+        prev_node = prev_node[:-5]
+      bias_tensor = reader.get_tensor(prev_node)
+      break
+  fc_array = {'layer_type': 'fc',
+               'out_depth': 1,
+               'out_sx': 1,
+               'out_sy': 1,
+               'biases': array_to_json(bias_tensor),
+               'filters': {}}
+  for col_index in range(variable_tensor.shape[1]):
+    fc_array['filters'][str(col_index)] = array_to_json(variable_tensor[:,col_index])
+
+  return fc_array
 
 while marker < len(path):
   node_proto = nodes_by_key[path[marker]]
@@ -92,9 +121,9 @@ while marker < len(path):
                 'out_sx': shape[1],
                 'out_sy': shape[2]}]
   elif node_proto.op == 'MatMul':
-    print node_proto
-    if False and marker < len(path) - 1 and nodes_by_key[path[marker+1]].op == 'Add':
-      layers += build_affine_matrix(node_proto, nodes_by_key[path[marker+1]])
+    if marker < len(path) - 1 and nodes_by_key[path[marker+1]].op == 'Add':
+      layers += [build_affine_matrix(node_proto, nodes_by_key[path[marker+1]],
+                                    nodes_by_key[path[marker-1]].name)]
   elif node_proto.op == 'Relu':
     shape = get_shape(node_proto)
     layers += [{'layer_type': 'relu',
@@ -103,7 +132,4 @@ while marker < len(path):
                 'out_sy': shape[2]}]
   marker += 1
 
-save_path = saver.save(sess, 'model.ckpt')
-
-print reader.debug_string().decode("utf-8")
-#print reader.get_tensor('Variable')
+print layers
