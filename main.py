@@ -86,6 +86,7 @@ def generate_model_json(meta_file, checkpoint_file):
 
   graph_def = tf.get_default_graph().as_graph_def(add_shapes=True)
   graph = graph_util.TFGraph(graph_def)
+  print graph_util.find_longest_path(graph)
 
   reader = tf.train.NewCheckpointReader(checkpoint_file)
   path = find_node_path(INPUT_NODE_NAME, OUTPUT_NODE_NAME, graph)
