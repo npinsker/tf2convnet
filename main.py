@@ -72,24 +72,30 @@ def build_affine_matrix(matrix_node, add_node, prev_node_name, checkpoint_reader
 
   return fc_array
 
-def generate_model_json(meta_file, checkpoint_file):
+def generate_model_json(args):
   INPUT_NODE_NAME = 'Placeholder'
   OUTPUT_NODE_NAME = 'Relu'
 
   layers = []
   marker = 0
-  reader = tf.train.NewCheckpointReader(checkpoint_file)
+  reader = tf.train.NewCheckpointReader(args.checkpoint_file[0])
   sess = tf.Session()
 
-  saver = tf.train.import_meta_graph(meta_file)
-  saver.restore(sess, checkpoint_file)
+  saver = tf.train.import_meta_graph(args.meta_file[0])
+  saver.restore(sess, args.checkpoint_file[0])
 
   graph_def = tf.get_default_graph().as_graph_def(add_shapes=True)
   graph = graph_util.TFGraph(graph_def)
-  print graph_util.find_longest_path(graph)
-
   reader = tf.train.NewCheckpointReader(checkpoint_file)
-  path = find_node_path(INPUT_NODE_NAME, OUTPUT_NODE_NAME, graph)
+
+  path = []
+  if not args.input_node or not args.output_node:
+    print 'Input and/or output node not supplied! Autodetecting path.'
+    path = graph_util.find_longest_path(graph)
+    print 'Autodetected path %s' % path
+  else:
+    path = find_node_path(args.input_node[0], args.output_node[0], graph)
+    print 'Found path %s' % path
 
   while marker < len(path):
     node_proto = graph.get_node(path[marker])
